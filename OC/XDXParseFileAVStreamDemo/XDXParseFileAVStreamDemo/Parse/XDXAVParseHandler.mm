@@ -65,6 +65,8 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
 + (void)initialize {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        
+        // - 注册所有组件
         av_register_all();
     });
 }
@@ -111,7 +113,7 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
 #pragma mark - Private
 #pragma mark Prepare
 - (void)prepareParseWithPath:(NSString *)path {
-    // Create format context
+    // - 创建媒体格式上下文
     m_formatContext = [self createFormatContextbyFilePath:path];
     
     if (m_formatContext == NULL) {
@@ -119,17 +121,18 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
         return;
     }
     
-    // Get video stream index
+    // - 查找视频流的下标
     m_videoStreamIndex = [self getAVStreamIndexWithFormatContext:m_formatContext
                                                    isVideoStream:YES];
     
-    // Get video stream
+    // - 拿到视频流的流信息
     AVStream *videoStream = m_formatContext->streams[m_videoStreamIndex];
     m_video_width  = videoStream->codecpar->width;
     m_video_height = videoStream->codecpar->height;
     m_video_fps    = GetAVStreamFPSTimeBase(videoStream);
     log4cplus_info(kModuleName, "%s: video index:%d, width:%d, height:%d, fps:%d",__func__,m_videoStreamIndex,m_video_width,m_video_height,m_video_fps);
     
+    // - 判断视频是否支持解码和播放
     BOOL isSupport = [self isSupportVideoStream:videoStream
                                   formatContext:m_formatContext
                                     sourceWidth:m_video_width
@@ -140,13 +143,13 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
         return;
     }
     
-    // Get audio stream index
+    // - 获取音频流
     m_audioStreamIndex = [self getAVStreamIndexWithFormatContext:m_formatContext
                                                    isVideoStream:NO];
-    
-    // Get audio stream
+    // - 拿到音频流的信息
     AVStream *audioStream = m_formatContext->streams[m_audioStreamIndex];
     
+    // - 判断音频是否支持解码和播放
     isSupport = [self isSupportAudioStream:audioStream
                              formatContext:m_formatContext];
     if (!isSupport) {
@@ -166,7 +169,10 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
     
     av_dict_set(&opts, "timeout", "1000000", 0);//设置超时1秒
     
+    // - 创建格式上下文
     formatContext = avformat_alloc_context();
+    
+    // - 打开文件
     BOOL isSuccess = avformat_open_input(&formatContext, [filePath cStringUsingEncoding:NSUTF8StringEncoding], NULL, &opts) < 0 ? NO : YES;
     av_dict_free(&opts);
     if (!isSuccess) {
@@ -176,6 +182,7 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
         return NULL;
     }
     
+    // - 查找流
     if (avformat_find_stream_info(formatContext, NULL) < 0) {
         avformat_close_input(&formatContext);
         return NULL;
@@ -185,6 +192,10 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
 }
 
 - (int)getAVStreamIndexWithFormatContext:(AVFormatContext *)formatContext isVideoStream:(BOOL)isVideoStream {
+    /*
+     formatContext->nb_streams 格式上下文的所有流的数量(包括音频流, 视频流等)
+     formatContext->streams    格式上下文的所有流(包括音频流, 视频流等)
+     */
     int avStreamIndex = -1;
     for (int i = 0; i < formatContext->nb_streams; i++) {
         if ((isVideoStream ? AVMEDIA_TYPE_VIDEO : AVMEDIA_TYPE_AUDIO) == formatContext->streams[i]->codecpar->codec_type) {
@@ -295,6 +306,7 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
 }
 
 #pragma mark Start Parse
+// - 开始解封装, 解封装后就是h264裸流了
 - (void)startParseWithFormatContext:(AVFormatContext *)formatContext videoStreamIndex:(int)videoStreamIndex audioStreamIndex:(int)audioStreamIndex completionHandler:(void (^)(BOOL isVideoFrame, BOOL isFinish, struct XDXParseVideoDataInfo *videoInfo, struct XDXParseAudioDataInfo *audioInfo))handler{
     m_isStopParse = NO;
     
@@ -302,18 +314,23 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
     dispatch_async(parseQueue, ^{
         int fps = GetAVStreamFPSTimeBase(formatContext->streams[videoStreamIndex]);
         
+        // - packet 存储解封装后的压缩的数据
         AVPacket    packet;
         AVRational  input_base;
         input_base.num = 1;
         input_base.den = 1000;
         
         Float64 current_timestamp = [self getCurrentTimestamp];
+        NSLog(@"QGTest-------beginReadFrame");
+        // - 解封装
         while (!self->m_isStopParse) {
+            // - 给封装的数据开辟空间
             av_init_packet(&packet);
             if (!formatContext) {
                 break;
             }
             
+            // - 解封装的数据,并将解封装的结果存到packet中
             int size = av_read_frame(formatContext, &packet);
             if (size < 0 || packet.size < 0) {
                 handler(YES, YES, NULL, NULL);
@@ -321,10 +338,11 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
                 break;
             }
             
+            // - 判断解封装的是视频数据还是音频数据
             if (packet.stream_index == videoStreamIndex) {
                 XDXParseVideoDataInfo videoInfo = {0};
                 
-                // get the rotation angle of video
+                // - 视频的旋转角度
                 AVDictionaryEntry *tag = NULL;
                 tag = av_dict_get(formatContext->streams[videoStreamIndex]->metadata, "rotate", tag, 0);
                 if (tag != NULL) {
@@ -350,10 +368,12 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
                     break;
                 }
                 
+                // - 保存视频数据的
                 int video_size = packet.size;
                 uint8_t *video_data = (uint8_t *)malloc(video_size);
                 memcpy(video_data, packet.data, video_size);
                 
+                // - 保存视频的编码方式  filter_name 后边用于过滤器
                 static char filter_name[32];
                 if (formatContext->streams[videoStreamIndex]->codecpar->codec_id == AV_CODEC_ID_H264) {
                     strncpy(filter_name, "h264_mp4toannexb", 32);
@@ -374,7 +394,7 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
                 }
                 */
                 
-                // get sps,pps. If not call it, get sps , pps is incorrect. use new_packet to resolve memory leak.
+                // - 过滤数据, 过滤后 每个AVPacket的data添加了H.264的NALU的起始码{0,0,0,1}  每个IDR帧数据前面添加了SPS和PPS
                 AVPacket new_packet = packet;
                 if (self->m_bitFilterContext == NULL) {
                     self->m_bitFilterContext = av_bitstream_filter_init(filter_name);
@@ -383,14 +403,18 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
                 
                 //log4cplus_info(kModuleName, "%s: extra data : %s , size : %d",__func__,formatContext->streams[videoStreamIndex]->codec->extradata,formatContext->streams[videoStreamIndex]->codec->extradata_size);
                 
+                // - 获取 dts 和 pts
                 CMSampleTimingInfo timingInfo;
-                CMTime presentationTimeStamp     = kCMTimeInvalid;
+                
+                // - 显示顺序
                 Float64 ptsSec = packet.pts * av_q2d(formatContext->streams[videoStreamIndex]->time_base);
-                presentationTimeStamp = CMTimeMake(ptsSec*1000000, 1000000);
-                timingInfo.presentationTimeStamp = presentationTimeStamp;
+                timingInfo.presentationTimeStamp = CMTimeMake(ptsSec*1000000, 1000000);
+                
+                // - 解码顺序
                 Float64 dtsSec = av_rescale_q(packet.dts, formatContext->streams[videoStreamIndex]->time_base, input_base);
                 timingInfo.decodeTimeStamp       = CMTimeMake(dtsSec*1000000, 1000000);;
                 
+                // - 将解封装的数据保存到 videoInfo 中.
                 videoInfo.data          = video_data;
                 videoInfo.dataSize      = video_size;
                 videoInfo.extraDataSize = formatContext->streams[videoStreamIndex]->codec->extradata_size;
@@ -398,11 +422,11 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
                 videoInfo.timingInfo    = timingInfo;
                 videoInfo.pts           = packet.pts * av_q2d(formatContext->streams[videoStreamIndex]->time_base);
                 videoInfo.fps           = fps;
-                
                 memcpy(videoInfo.extraData, formatContext->streams[videoStreamIndex]->codec->extradata, videoInfo.extraDataSize);
                 av_free(new_packet.data);
-                
-                // send videoInfo
+                NSLog(@"QGTest-------readFrame: dataSize:%d", videoInfo.dataSize);
+
+                // - 将 videoInfo 回调回去
                 if (handler) {
                     handler(YES, NO, &videoInfo, NULL);
                 }
@@ -411,8 +435,11 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
                 free(videoInfo.data);
             }
             
+            // - 音频数据
             if (packet.stream_index == audioStreamIndex) {
+                // - 保存音频数据
                 XDXParseAudioDataInfo audioInfo = {0};
+                
                 audioInfo.data = (uint8_t *)malloc(packet.size);
                 memcpy(audioInfo.data, packet.data, packet.size);
                 audioInfo.dataSize = packet.size;
@@ -420,7 +447,7 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
                 audioInfo.sampleRate = formatContext->streams[audioStreamIndex]->codecpar->sample_rate;
                 audioInfo.pts = packet.pts * av_q2d(formatContext->streams[audioStreamIndex]->time_base);
                 
-                // send audio info
+                // - 回调保存后的音频数据
                 if (handler) {
                     handler(NO, NO, NULL, &audioInfo);
                 }
@@ -440,6 +467,7 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
     dispatch_queue_t parseQueue = dispatch_queue_create("parse_queue", DISPATCH_QUEUE_SERIAL);
     dispatch_async(parseQueue, ^{
         AVPacket    packet;
+        NSLog(@"QGTest-------beginReadFrame");
         while (!self->m_isStopParse) {
             if (!formatContext) {
                 break;
@@ -453,7 +481,7 @@ static int GetAVStreamFPSTimeBase(AVStream *st) {
                 log4cplus_error(kModuleName, "%s: Parse finish",__func__);
                 break;
             }
-            
+            NSLog(@"QGTest-------readFrame: dataSize:%d", packet.size);
             if (packet.stream_index == videoStreamIndex) {
                 handler(YES, NO, packet);
             }else {

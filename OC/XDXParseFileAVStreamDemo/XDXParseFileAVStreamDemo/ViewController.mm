@@ -41,7 +41,7 @@ int kXDXBufferSize = 4096;
     // Do any additional setup after loading the view.
     
     // Set it to select decode method
-    self.isUseFFmpeg = YES;
+    self.isUseFFmpeg = NO;
     
     [self setupUI];
     [self configureAudioPlayer];
